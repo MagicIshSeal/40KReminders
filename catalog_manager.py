@@ -77,15 +77,29 @@ class CatalogDownloader:
         if not self.available_catalogs:
             self.fetch_available_catalogs()
         
+        # Normalize catalog name for matching
+        # Remove "Adeptus Astartes" as it's redundant with "Space Marines"
+        normalized_name = catalog_name.replace('Adeptus Astartes - ', '').replace('Astartes - ', '')
+        
         # Find the catalog
         catalog = None
         for cat in self.available_catalogs:
-            if catalog_name.lower() in cat['display_name'].lower():
+            # Try exact match first
+            if normalized_name.lower() == cat['display_name'].lower():
+                catalog = cat
+                break
+            # Try substring match
+            elif normalized_name.lower() in cat['display_name'].lower():
+                catalog = cat
+                break
+            # Try reverse substring match (catalog name in search string)
+            elif cat['display_name'].lower() in normalized_name.lower():
                 catalog = cat
                 break
         
         if not catalog:
             print(f"Catalog '{catalog_name}' not found.")
+            print(f"Tried normalizing to: '{normalized_name}'")
             return None
         
         # Check if already cached

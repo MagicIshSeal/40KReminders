@@ -1,6 +1,8 @@
 import json
 import re
 from typing import List, Dict
+from fpdf import FPDF
+from datetime import datetime
 
 # 40K Game Phases
 PHASES = [
@@ -57,11 +59,20 @@ class UnitReminder:
     
     def _build_caches(self):
         """Build searchable caches"""
-        # Cache units
+        # Cache units from main catalog
         for entry in self.data['selectionEntries']:
             if entry['type'] in ['unit', 'model']:
                 unit_name = entry['name'].lower()
                 self.units_cache[unit_name] = entry
+        
+        # Cache units from imported catalogs
+        for imported in self.imported_catalogs:
+            for entry in imported.get('selectionEntries', []):
+                if entry['type'] in ['unit', 'model']:
+                    unit_name = entry['name'].lower()
+                    # Don't overwrite units from main catalog
+                    if unit_name not in self.units_cache:
+                        self.units_cache[unit_name] = entry
         
         # Cache detachments
         self.detachments_cache = {}
@@ -437,6 +448,286 @@ class UnitReminder:
         
         print(f"\n{'='*70}\n")
     
+    def display_roster_reminders(self, roster_units: list, detachment_name: str = None):
+        """Display reminders for all units in a roster"""
+        print(f"\n{'='*70}")
+        print(f"ROSTER REMINDERS")
+        if detachment_name:
+            print(f"DETACHMENT: {detachment_name}")
+        print(f"{'='*70}\n")
+        
+        # Collect army-wide and detachment-wide rules (show once)
+        army_rules = {}
+        detachment_rules = {}
+        
+        # Get first unit to extract army/detachment rules
+        if roster_units:
+            first_unit = roster_units[0]
+            unit_name = first_unit.get('customName') or first_unit.get('name')
+            result = self.get_reminders(unit_name, detachment_name)
+            
+            if result and result.get('reminders'):
+                # Extract army and detachment rules
+                for phase, reminders in result['reminders'].items():
+                    for reminder in reminders:
+                        source = reminder.get('source')
+                        if source in ['army_rule', 'army_ability']:
+                            if phase not in army_rules:
+                                army_rules[phase] = []
+                            army_rules[phase].append(reminder)
+                        elif source == 'detachment':
+                            if phase not in detachment_rules:
+                                detachment_rules[phase] = []
+                            detachment_rules[phase].append(reminder)
+                
+                # Display army-wide and detachment rules once
+                if army_rules or detachment_rules:
+                    print("ARMY-WIDE RULES")
+                    print("─" * 70)
+                    
+                    for phase in PHASES:
+                        phase_reminders = army_rules.get(phase, []) + detachment_rules.get(phase, [])
+                        if phase_reminders:
+                            print(f"\n  📍 {phase.upper()}")
+                            for reminder in phase_reminders:
+                                desc = reminder['description'].replace('**', '').replace('^^', '')
+                                if len(desc) > 150:
+                                    desc = desc[:147] + "..."
+                                desc = desc.replace('\n', ' ').replace('  ', ' ')
+                                
+                                source_map = {
+                                    'army_rule': '🔹',
+                                    'army_ability': '🔹',
+                                    'detachment': '🔷'
+                                }
+                                icon = source_map.get(reminder.get('source'), '⚡')
+                                print(f"    {icon} {reminder['ability']}: {desc}")
+                    
+                    print(f"\n{'='*70}\n")
+        
+        units_found = 0
+        units_not_found = []
+        
+        for unit_data in roster_units:
+            unit_name = unit_data.get('customName') or unit_data.get('name')
+            count = unit_data.get('number', 1)
+            composition = unit_data.get('composition', [])
+            
+            result = self.get_reminders(unit_name, detachment_name)
+            
+            if not result:
+                units_not_found.append(unit_name)
+                continue
+            
+            units_found += 1
+            
+            # Display unit header with composition
+            print(f"\n{'─'*70}")
+            if count > 1:
+                print(f"📋 {count}x {unit_name}")
+            else:
+                print(f"📋 {unit_name}")
+            
+            if composition:
+                print(f"   └─ {', '.join(composition)}")
+            print(f"{'─'*70}")
+            
+            # Display only unit-specific reminders (skip army/detachment rules)
+            has_reminders = False
+            for phase in PHASES:
+                if phase in result['reminders'] and result['reminders'][phase]:
+                    # Filter out army and detachment rules
+                    unit_specific = [r for r in result['reminders'][phase] 
+                                   if r.get('source') not in ['army_rule', 'army_ability', 'detachment']]
+                    
+                    if unit_specific:
+                        has_reminders = True
+                        print(f"\n  📍 {phase.upper()}")
+                        for reminder in unit_specific:
+                            desc = reminder['description'].replace('**', '').replace('^^', '')
+                            if len(desc) > 150:
+                                desc = desc[:147] + "..."
+                            desc = desc.replace('\n', ' ').replace('  ', ' ')
+                            print(f"    ⚡ {reminder['ability']}: {desc}")
+            
+            # Always active abilities (brief)
+            if "Always Active" in result['reminders'] and result['reminders']['Always Active']:
+                if has_reminders:
+                    print()
+                print("  📌 Passive:", end="")
+                ability_names = [r['ability'] for r in result['reminders']['Always Active']]
+                print(" " + ", ".join(ability_names))
+            
+            # If no unit-specific abilities, show message
+            if not has_reminders and not result['reminders'].get('Always Active'):
+                print("  No unit-specific abilities")
+        
+        # Summary
+        print(f"\n{'='*70}")
+        print(f"✓ Displayed reminders for {units_found} unit(s)")
+        if units_not_found:
+            print(f"⚠ Could not find: {', '.join(units_not_found)}")
+        print(f"{'='*70}\n")
+
+    def export_roster_to_pdf(self, roster_units: list, detachment_name: str = None, 
+                            army_name: str = None, filename: str = "roster_reminders.pdf"):
+        """Export roster reminders to a PDF file"""
+        
+        def clean_text(text):
+            """Clean text for PDF encoding"""
+            # Replace common unicode characters
+            replacements = {
+                ''': "'", ''': "'", '"': '"', '"': '"',
+                '–': '-', '—': '-', '…': '...',
+                '×': 'x', '•': '*'
+            }
+            for old, new in replacements.items():
+                text = text.replace(old, new)
+            # Remove any remaining non-ASCII characters
+            return text.encode('ascii', 'ignore').decode('ascii')
+        
+        pdf = FPDF()
+        pdf.set_margins(15, 15, 15)
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        
+        # Title
+        pdf.set_font('Helvetica', 'B', 16)
+        pdf.cell(0, 10, 'WARHAMMER 40K ROSTER REMINDERS', new_x="LMARGIN", new_y="NEXT", align='C')
+        pdf.set_font('Helvetica', '', 10)
+        pdf.cell(0, 6, f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M")}', new_x="LMARGIN", new_y="NEXT", align='C')
+        
+        if army_name:
+            pdf.set_font('Helvetica', 'B', 12)
+            pdf.cell(0, 8, f'Army: {clean_text(army_name)}', new_x="LMARGIN", new_y="NEXT", align='C')
+        
+        if detachment_name:
+            pdf.set_font('Helvetica', 'I', 11)
+            pdf.cell(0, 6, f'Detachment: {clean_text(detachment_name)}', new_x="LMARGIN", new_y="NEXT", align='C')
+        
+        pdf.ln(5)
+        
+        # Collect army-wide and detachment-wide rules
+        army_rules = {}
+        detachment_rules = {}
+        
+        if roster_units:
+            first_unit = roster_units[0]
+            unit_name = first_unit.get('customName') or first_unit.get('name')
+            result = self.get_reminders(unit_name, detachment_name)
+            
+            if result and result.get('reminders'):
+                for phase, reminders in result['reminders'].items():
+                    for reminder in reminders:
+                        source = reminder.get('source')
+                        if source in ['army_rule', 'army_ability']:
+                            if phase not in army_rules:
+                                army_rules[phase] = []
+                            army_rules[phase].append(reminder)
+                        elif source == 'detachment':
+                            if phase not in detachment_rules:
+                                detachment_rules[phase] = []
+                            detachment_rules[phase].append(reminder)
+                
+                # Display army-wide and detachment rules
+                if army_rules or detachment_rules:
+                    pdf.set_fill_color(220, 220, 220)
+                    pdf.set_font('Helvetica', 'B', 12)
+                    pdf.cell(0, 8, 'ARMY-WIDE RULES', new_x="LMARGIN", new_y="NEXT", fill=True)
+                    pdf.ln(2)
+                    
+                    for phase in PHASES:
+                        phase_reminders = army_rules.get(phase, []) + detachment_rules.get(phase, [])
+                        if phase_reminders:
+                            pdf.set_font('Helvetica', 'B', 11)
+                            pdf.cell(0, 6, phase.upper(), new_x="LMARGIN", new_y="NEXT")
+                            
+                            for reminder in phase_reminders:
+                                source_prefix = '* ' if reminder.get('source') in ['army_rule', 'army_ability'] else '+ '
+                                pdf.set_font('Helvetica', '', 10)
+                                
+                                ability = clean_text(reminder['ability'])
+                                desc = clean_text(reminder['description'].replace('**', '').replace('^^', '').replace('\n', ' '))
+                                
+                                # Handle long text - use explicit width
+                                text = f"{source_prefix}{ability}: {desc}"
+                                pdf.multi_cell(w=0, h=5, text=text, new_x="LMARGIN", new_y="NEXT")
+                            
+                            pdf.ln(2)
+                    
+                    pdf.ln(3)
+        
+        # Display units
+        units_found = 0
+        for unit_data in roster_units:
+            unit_name = unit_data.get('customName') or unit_data.get('name')
+            count = unit_data.get('number', 1)
+            composition = unit_data.get('composition', [])
+            
+            result = self.get_reminders(unit_name, detachment_name)
+            
+            if not result:
+                continue
+            
+            units_found += 1
+            
+            # Unit header
+            pdf.set_fill_color(240, 240, 240)
+            pdf.set_font('Helvetica', 'B', 11)
+            if count > 1:
+                pdf.cell(0, 7, clean_text(f'{count}x {unit_name}'), new_x="LMARGIN", new_y="NEXT", fill=True)
+            else:
+                pdf.cell(0, 7, clean_text(unit_name), new_x="LMARGIN", new_y="NEXT", fill=True)
+            
+            if composition:
+                pdf.set_font('Helvetica', 'I', 9)
+                pdf.cell(0, 5, '  ' + clean_text(', '.join(composition)), new_x="LMARGIN", new_y="NEXT")
+            
+            pdf.ln(1)
+            
+            # Display only unit-specific reminders
+            has_reminders = False
+            for phase in PHASES:
+                if phase in result['reminders'] and result['reminders'][phase]:
+                    unit_specific = [r for r in result['reminders'][phase] 
+                                   if r.get('source') not in ['army_rule', 'army_ability', 'detachment']]
+                    
+                    if unit_specific:
+                        has_reminders = True
+                        pdf.set_font('Helvetica', 'B', 10)
+                        pdf.cell(0, 5, phase.upper(), new_x="LMARGIN", new_y="NEXT")
+                        
+                        for reminder in unit_specific:
+                            pdf.set_font('Helvetica', '', 9)
+                            ability = clean_text(reminder['ability'])
+                            desc = clean_text(reminder['description'].replace('**', '').replace('^^', '').replace('\n', ' '))
+                            text = f"  > {ability}: {desc}"
+                            pdf.multi_cell(w=0, h=4, text=text, new_x="LMARGIN", new_y="NEXT")
+                        
+                        pdf.ln(1)
+            
+            # Always active abilities
+            if "Always Active" in result['reminders'] and result['reminders']['Always Active']:
+                pdf.set_font('Helvetica', 'I', 9)
+                ability_names = [clean_text(r['ability']) for r in result['reminders']['Always Active']]
+                text = f"  Passive: {', '.join(ability_names)}"
+                pdf.multi_cell(w=0, h=4, text=text, new_x="LMARGIN", new_y="NEXT")
+            
+            if not has_reminders and not result['reminders'].get('Always Active'):
+                pdf.set_font('Helvetica', 'I', 9)
+                pdf.cell(0, 4, '  No unit-specific abilities', new_x="LMARGIN", new_y="NEXT")
+            
+            pdf.ln(3)
+        
+        # Save PDF
+        try:
+            pdf.output(filename)
+            print(f"\n✓ PDF exported to: {filename}")
+            return filename
+        except Exception as e:
+            print(f"\n✗ Failed to export PDF: {e}")
+            return None
+    
     def list_all_units(self):
         """List all available units"""
         print(f"\nAvailable Units ({len(self.units_cache)}):")
@@ -448,17 +739,73 @@ class UnitReminder:
 def main():
     import sys
     from catalog_manager import CatalogDownloader
+    from rosterParser import RosterParser
+    from pathlib import Path
     
     if len(sys.argv) < 2:
-        print("Usage: python reminders.py <army_name> <unit_name> [detachment_name]")
+        print("Usage: python reminders.py <roster_file.ros|.rosz>")
+        print("       python reminders.py <army_name> <unit_name> [detachment_name]")
         print("       python reminders.py <army_name> --list-detachments")
         print("       python reminders.py --list-armies")
-        print("\nExample: python reminders.py 'Space Marines' 'Captain in Gravis Armour' 'Gladius Task Force'")
-        print("Example: python reminders.py 'Tyranids' 'Hive Tyrant'")
-        print("Example: python reminders.py 'Space Marines' --list-detachments")
+        print("\nRoster Mode:")
+        print("  python reminders.py my_army.rosz")
+        print("\nManual Mode:")
+        print("  python reminders.py 'Space Marines' 'Captain in Gravis Armour' 'Gladius Task Force'")
+        print("  python reminders.py 'Tyranids' 'Hive Tyrant'")
+        print("  python reminders.py 'Space Marines' --list-detachments")
         return
     
     downloader = CatalogDownloader()
+    
+    # Check if first argument is a roster file
+    first_arg = sys.argv[1]
+    if Path(first_arg).suffix.lower() in ['.ros', '.rosz']:
+        # ROSTER MODE
+        try:
+            print(f"Loading roster: {first_arg}")
+            roster = RosterParser(first_arg)
+            
+            print("\n" + roster.get_summary())
+            print()
+            
+            army_name = roster.get_army_name()
+            detachment = roster.get_detachment()
+            units = roster.get_units()
+            
+            if not units:
+                print("No units found in roster.")
+                return
+            
+            # Download game system file
+            print("Loading game system...")
+            game_system_file = downloader.download_game_system()
+            
+            # Download/load catalog
+            print(f"Loading {army_name} catalog...")
+            json_file = downloader.download_catalog(army_name)
+            
+            if not json_file:
+                print(f"Failed to load catalog for {army_name}")
+                return
+            
+            # Load the reminder system
+            reminder = UnitReminder(json_file, game_system_file)
+            
+            # Display reminders for all units
+            reminder.display_roster_reminders(units, detachment)
+            
+            # Ask if user wants to export to PDF
+            try:
+                export = input("\nExport to PDF? (y/n): ").strip().lower()
+                if export == 'y':
+                    pdf_filename = f"{Path(first_arg).stem}_reminders.pdf"
+                    reminder.export_roster_to_pdf(units, detachment, army_name, pdf_filename)
+            except (KeyboardInterrupt, EOFError):
+                print()  # Clean newline after interrupt
+            
+        except Exception as e:
+            print(f"Error processing roster: {e}")
+        return
     
     # List armies
     if sys.argv[1] == '--list-armies':
