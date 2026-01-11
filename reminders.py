@@ -13,18 +13,83 @@ PHASES = [
 ]
 
 class UnitReminder:
-    def __init__(self, json_file):
+    def __init__(self, json_file, game_system_file=None):
         with open(json_file, 'r', encoding='utf-8') as f:
             self.data = json.load(f)
+        
+        # Load game system file if provided
+        self.game_system_data = None
+        if game_system_file:
+            try:
+                with open(game_system_file, 'r', encoding='utf-8') as f:
+                    self.game_system_data = json.load(f)
+            except:
+                pass
+        
+        # Load imported catalogs
+        self.imported_catalogs = []
+        self._load_imported_catalogs(json_file)
+        
+        # Build lookup tables
         self.units_cache = {}
-        self._build_units_cache()
+        self.rules_cache = {}
+        self.profiles_cache = {}
+        self._build_caches()
     
-    def _build_units_cache(self):
-        """Build a searchable cache of units"""
+    def _load_imported_catalogs(self, json_file):
+        """Load catalogs that this catalog imports from"""
+        from pathlib import Path
+        cache_dir = Path(json_file).parent
+        
+        for link in self.data.get('catalogueLinks', []):
+            if link.get('name'):
+                # Try to find corresponding JSON file
+                catalog_name = link['name'] + '.json'
+                catalog_path = cache_dir / catalog_name
+                
+                if catalog_path.exists():
+                    try:
+                        with open(catalog_path, 'r', encoding='utf-8') as f:
+                            imported_data = json.load(f)
+                            self.imported_catalogs.append(imported_data)
+                    except:
+                        pass
+    
+    def _build_caches(self):
+        """Build searchable caches"""
+        # Cache units
         for entry in self.data['selectionEntries']:
             if entry['type'] in ['unit', 'model']:
                 unit_name = entry['name'].lower()
                 self.units_cache[unit_name] = entry
+        
+        # Cache rules from catalog
+        for rule in self.data.get('sharedRules', []):
+            self.rules_cache[rule['id']] = rule
+        
+        # Cache profiles from catalog
+        for profile in self.data.get('sharedProfiles', []):
+            self.profiles_cache[profile['id']] = profile
+        
+        # Cache from imported catalogs
+        for imported in self.imported_catalogs:
+            for rule in imported.get('sharedRules', []):
+                if rule['id'] not in self.rules_cache:
+                    self.rules_cache[rule['id']] = rule
+            
+            for profile in imported.get('sharedProfiles', []):
+                if profile['id'] not in self.profiles_cache:
+                    self.profiles_cache[profile['id']] = profile
+        
+        # Cache rules and profiles from game system if available
+        if self.game_system_data:
+            for rule in self.game_system_data.get('sharedRules', []):
+                if rule['id'] not in self.rules_cache:
+                    self.rules_cache[rule['id']] = rule
+            
+            for profile in self.game_system_data.get('sharedProfiles', []):
+                if profile['id'] not in self.profiles_cache:
+                    self.profiles_cache[profile['id']] = profile
     
     def find_unit(self, unit_name: str) -> Dict:
         """Find a unit by name (case-insensitive partial match)"""
@@ -52,50 +117,55 @@ class UnitReminder:
     
     def _categorize_ability(self, description: str) -> List[str]:
         """Analyze ability text to determine which phase(s) it applies to"""
-        desc_lower = description.lower()
-        phases = []
+        # Clean up special formatting characters and normalize spaces
+        desc_lower = description.lower().replace('**', '').replace('^^', '')
+        # Replace non-breaking spaces and other unicode spaces with regular spaces
+        desc_lower = desc_lower.replace('\u00a0', ' ').replace('\u2009', ' ')
         
-        # Phase detection keywords
-        phase_keywords = {
-            "Command Phase": [
-                "command phase", "start of your command phase",
-                "during the command phase", "in your command phase"
-            ],
-            "Movement Phase": [
-                "movement phase", "when this unit advances",
-                "when this unit falls back", "normal move", "remain stationary"
-            ],
-            "Shooting Phase": [
-                "shooting phase", "ranged attack", "ranged weapon",
-                "shoot", "when this unit shoots", "before selecting targets"
-            ],
-            "Charge Phase": [
-                "charge phase", "when this unit charges",
-                "declare a charge", "charge roll"
-            ],
-            "Fight Phase": [
-                "fight phase", "melee attack", "melee weapon",
-                "when this unit fights", "close combat", "pile in", "consolidate"
-            ],
-            "Any Phase": [
-                "any phase", "at any time", "once per battle",
-                "each time", "while this", "when an attack"
-            ]
-        }
+        # Skip generic always-active rules first
+        if any(skip in desc_lower for skip in [
+            'this model can be attached to',
+            'while a bodyguard unit contains a leader',
+            'each time the last model in a bodyguard',
+            'embarking within transports',
+            'scouts',
+            'stealth'
+        ]):
+            return ["Always Active"]
         
-        for phase, keywords in phase_keywords.items():
-            for keyword in keywords:
-                if keyword in desc_lower:
-                    if phase not in phases:
-                        phases.append(phase)
+        # Check for SPECIFIC phase triggers FIRST (most specific)
+        if "at the start of your command phase" in desc_lower:
+            return ["Command Phase"]
         
-        # If no specific phase detected but has timing indicators
-        if not phases:
-            timing_words = ["when", "while", "each time", "if", "at the"]
-            if any(word in desc_lower for word in timing_words):
-                phases.append("Any Phase")
+        # Check for movement phase first
+        if "at the start of your movement phase" in desc_lower or "in your movement phase" in desc_lower:
+            return ["Movement Phase"]
         
-        return phases if phases else ["Always Active"]
+        # Then check for command phase (less specific)
+        if "in your command phase" in desc_lower:
+            return ["Command Phase"]
+        
+        # Check for "once per battle" in command phase
+        if "in either player" in desc_lower and "command phase" in desc_lower:
+            return ["Command Phase"]
+        
+        if "at the start of the fight phase" in desc_lower:
+            return ["Fight Phase"]
+        
+        if "in the fight phase" in desc_lower or "when this unit fights" in desc_lower:
+            return ["Fight Phase"]
+        
+        if "in the shooting phase" in desc_lower or "when this unit shoots" in desc_lower:
+            return ["Shooting Phase"]
+        
+        if "in the charge phase" in desc_lower or "when this unit charges" in desc_lower:
+            return ["Charge Phase"]
+        
+        if "deep strike" in desc_lower:
+            return ["Movement Phase"]
+        
+        # Only after checking all specific phases, check for always active
+        return ["Always Active"]
     
     def get_reminders(self, unit_name: str) -> Dict[str, List[Dict]]:
         """Get phase-organized reminders for a unit"""
@@ -107,24 +177,122 @@ class UnitReminder:
         # Organize abilities by phase
         phase_reminders = {phase: [] for phase in PHASES}
         phase_reminders["Always Active"] = []
+        seen_abilities = {}  # Track to avoid duplicates
         
         # Extract abilities from profiles
         for profile in unit.get('profiles', []):
             if profile.get('typeName') == 'Abilities':
                 ability_name = profile['name']
                 
+                # Skip generic/useless abilities
+                skip_ability_names = ['Leader', 'Scouts', 'Stealth', 'Deep Strike', 'Embarking within Transports']
+                if ability_name in skip_ability_names:
+                    continue
+                
                 for char in profile.get('characteristics', []):
                     if char['name'] == 'Description':
                         description = char['value']
+                        
+                        # Skip overly verbose generic rules
+                        if len(description) > 500:
+                            continue
+                        
                         phases = self._categorize_ability(description)
+                        
+                # Skip if categorized as passive/generic
+                        if phases == ["Always Active"] and any(skip in description.lower() for skip in [
+                            'this model can be attached',
+                            'embarking within transports',
+                            'invulnerable save'
+                        ]):
+                            continue
+                        
+                        # Create unique key to avoid duplicates
+                        ability_key = f"{ability_name}:{description[:50]}"
+                        if ability_key in seen_abilities:
+                            continue
+                        seen_abilities[ability_key] = True
                         
                         reminder = {
                             'ability': ability_name,
-                            'description': description
+                            'description': description,
+                            'source': 'unit'
                         }
                         
-                        for phase in phases:
-                            phase_reminders[phase].append(reminder)
+                        # Only add to first matching phase
+                        if phases:
+                            phase_reminders[phases[0]].append(reminder)
+        
+        # Extract abilities from infoLinks
+        for info_link in unit.get('infoLinks', []):
+            if info_link.get('hidden', 'false') == 'true':
+                continue
+            
+            target_id = info_link.get('targetId', '')
+            link_type = info_link.get('type', '')
+            ability_name = info_link.get('name', '')
+            
+            # Skip generic rules that clutter output
+            skip_rules = ['Leader', 'Deep Strike', 'Invulnerable Save', 'Scouts', 'Stealth', 'Embarking within Transports', 'Deadly Demise', 'Lethal Hits', 'Sustained Hits', 'Devastating Wounds', 'Feel No Pain']
+            if ability_name in skip_rules or any(skip in ability_name for skip in ['Invulnerable Save', 'Deadly Demise', 'Feel No Pain']):
+                continue
+            
+            # Resolve rule
+            if link_type == 'rule' and target_id in self.rules_cache:
+                rule = self.rules_cache[target_id]
+                description = rule.get('description', '')
+                
+                # Skip overly long descriptions (keep important army rules)
+                if len(description) > 800 or not description:
+                    continue
+                
+                # Create unique key
+                ability_key = f"{rule['name']}:{description[:50]}"
+                if ability_key in seen_abilities:
+                    continue
+                seen_abilities[ability_key] = True
+                
+                phases = self._categorize_ability(description)
+                
+                reminder = {
+                    'ability': rule['name'],
+                    'description': description,
+                    'source': 'army_rule'
+                }
+                
+                # Only add to first matching phase
+                if phases:
+                    phase_reminders[phases[0]].append(reminder)
+            
+            # Resolve profile
+            elif link_type == 'profile' and target_id in self.profiles_cache:
+                profile = self.profiles_cache[target_id]
+                
+                for char in profile.get('characteristics', []):
+                    if char['name'] == 'Description':
+                        description = char['value']
+                        
+                        # Skip overly long descriptions
+                        if len(description) > 800 or not description:
+                            continue
+                        
+                        # Create unique key
+                        ability_key = f"{profile['name']}:{description[:50]}"
+                        if ability_key in seen_abilities:
+                            continue
+                        seen_abilities[ability_key] = True
+                        
+                        phases = self._categorize_ability(description)
+                        
+                        reminder = {
+                            'ability': profile['name'],
+                            'description': description,
+                            'source': 'army_ability'
+                        }
+                        
+                        # Only add to first matching phase
+                        if phases:
+                            phase_reminders[phases[0]].append(reminder)
         
         return {
             'unit_name': unit['name'],
@@ -153,26 +321,56 @@ class UnitReminder:
             return
         
         print(f"\n{'='*70}")
-        print(f"UNIT REMINDERS: {result['unit_name']}")
+        print(f"UNIT: {result['unit_name']}")
         print(f"{'='*70}")
-        print(f"Type: {result['unit_type']} | Cost: {result['cost']} pts")
+        print(f"Cost: {result['cost']} pts", end="")
         
         if result['stats']:
             stats_str = " | ".join([f"{k}: {v}" for k, v in result['stats'].items()])
-            print(f"Stats: {stats_str}")
+            print(f" | {stats_str}")
+        else:
+            print()
         
-        print(f"\n{'='*70}")
+        print(f"{'='*70}")
         
-        for phase in PHASES + ["Always Active"]:
+        # Display reminders organized by phase
+        for phase in PHASES:
             if phase in result['reminders'] and result['reminders'][phase]:
                 print(f"\n📍 {phase.upper()}")
                 print("-" * 70)
                 for reminder in result['reminders'][phase]:
-                    print(f"  ⚡ {reminder['ability']}")
-                    print(f"     {reminder['description']}")
+                    # Shorter description (truncate if too long)
+                    desc = reminder['description']
+                    # Remove formatting characters
+                    desc = desc.replace('**', '').replace('^^', '')
+                    if len(desc) > 250:
+                        desc = desc[:247] + "..."
+                    
+                    # Clean up formatting
+                    desc = desc.replace('\n', ' ').replace('  ', ' ')
+                    desc = desc.replace('■', '\n      •')
+                    
+                    source_icon = "🔹" if reminder.get('source') in ['army_rule', 'army_ability'] else "⚡"
+                    source_label = "[Army] " if reminder.get('source') in ['army_rule', 'army_ability'] else ""
+                    
+                    print(f"  {source_icon} {source_label}{reminder['ability']}")
+                    print(f"      {desc}")
                     print()
         
-        print(f"{'='*70}\n")
+        # Always active abilities (keep these minimal)
+        if "Always Active" in result['reminders'] and result['reminders']['Always Active']:
+            print(f"\n📌 PASSIVE ABILITIES")
+            print("-" * 70)
+            for reminder in result['reminders']['Always Active']:
+                desc = reminder['description']
+                # Remove formatting characters
+                desc = desc.replace('**', '').replace('^^', '')
+                if len(desc) > 150:
+                    desc = desc[:147] + "..."
+                desc = desc.replace('\n', ' ').replace('  ', ' ')
+                print(f"  • {reminder['ability']}: {desc}")
+        
+        print(f"\n{'='*70}\n")
     
     def list_all_units(self):
         """List all available units"""
@@ -184,22 +382,46 @@ class UnitReminder:
 
 def main():
     import sys
+    from catalog_manager import CatalogDownloader
     
     if len(sys.argv) < 2:
-        print("Usage: python reminders.py <unit_name>")
-        print("Example: python reminders.py 'Captain in Gravis Armour'")
-        print("Example: python reminders.py 'Intercessor Squad'")
-        print("\nTo list all units: python reminders.py --list")
+        print("Usage: python reminders.py <army_name> <unit_name>")
+        print("       python reminders.py --list-armies")
+        print("\nExample: python reminders.py 'Space Marines' 'Captain in Gravis Armour'")
+        print("Example: python reminders.py 'Tyranids' 'Hive Tyrant'")
+        return
+    
+    downloader = CatalogDownloader()
+    
+    # List armies
+    if sys.argv[1] == '--list-armies':
+        downloader.list_catalogs()
+        return
+    
+    # Get army and unit
+    if len(sys.argv) < 3:
+        print("Please provide both army name and unit name.")
+        print("Example: python reminders.py 'Space Marines' 'Captain'")
+        return
+    
+    army_name = sys.argv[1]
+    unit_name = ' '.join(sys.argv[2:])
+    
+    # Download game system file
+    print("Loading game system...")
+    game_system_file = downloader.download_game_system()
+    
+    # Download/load catalog
+    print(f"Loading {army_name} catalog...")
+    json_file = downloader.download_catalog(army_name)
+    
+    if not json_file:
+        print(f"Failed to load catalog for {army_name}")
         return
     
     # Load the reminder system
-    reminder = UnitReminder('space_marines.json')
-    
-    if sys.argv[1] == '--list':
-        reminder.list_all_units()
-    else:
-        unit_name = ' '.join(sys.argv[1:])
-        reminder.display_reminders(unit_name)
+    reminder = UnitReminder(json_file, game_system_file)
+    reminder.display_reminders(unit_name)
 
 
 if __name__ == "__main__":

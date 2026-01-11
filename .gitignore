@@ -1,5 +1,20 @@
-/Imperium - Space Marines.cat
-/output.txt
-/README.md
-/space_marines.json
-/__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Catalog cache
+catalog_cache/
+
+# Old files (if any)
+*.cat
+*.json
+output.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

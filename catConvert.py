@@ -379,13 +379,27 @@ def convert_to_json(filepath, output_file=None):
                             'characteristics': characteristics
                         })
                 
+                # Get infoLinks (references to shared rules/profiles)
+                info_links = []
+                info_link_list = entry.find('bs:infoLinks', ns)
+                if info_link_list is not None:
+                    for info_link in info_link_list.findall('bs:infoLink', ns):
+                        info_links.append({
+                            'id': info_link.get('id', ''),
+                            'name': info_link.get('name', ''),
+                            'type': info_link.get('type', ''),
+                            'targetId': info_link.get('targetId', ''),
+                            'hidden': info_link.get('hidden', 'false')
+                        })
+                
                 catalog_data['selectionEntries'].append({
                     'id': entry.get('id', ''),
                     'name': entry.get('name', ''),
                     'type': entry.get('type', ''),
                     'hidden': entry.get('hidden', 'false'),
                     'costs': costs,
-                    'profiles': profiles
+                    'profiles': profiles,
+                    'infoLinks': info_links
                 })
         
         # Parse shared selection entry groups
