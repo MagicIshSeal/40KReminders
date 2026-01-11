@@ -1,0 +1,60 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build executable with PyInstaller
+        run: |
+          pyinstaller build_spec.spec
+
+      - name: Create catalog_cache directory in dist
+        run: |
+          mkdir dist\catalog_cache
+          echo "Cache directory for downloaded catalogs" > dist\catalog_cache\README.txt
+
+      - name: Create release package
+        run: |
+          cd dist
+          Compress-Archive -Path WH40K_Roster_Reminders.exe,catalog_cache -DestinationPath WH40K_Roster_Reminders_Windows.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WH40K_Roster_Reminders_Windows
+          path: dist/WH40K_Roster_Reminders_Windows.zip
+          retention-days: 30
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/WH40K_Roster_Reminders_Windows.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

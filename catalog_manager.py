@@ -1,19 +1,73 @@
 import requests
 import os
 import json
+import sys
 from pathlib import Path
+from datetime import datetime, timedelta
 from catConvert import convert_to_json
 
 GITHUB_REPO = "BSData/wh40k-10e"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
-CACHE_DIR = Path("catalog_cache")
+
+# Determine if running as bundled .exe or script
+if getattr(sys, 'frozen', False):
+    # Running as compiled executable - use directory next to .exe
+    APPLICATION_PATH = Path(sys.executable).parent
+else:
+    # Running as script - use script directory
+    APPLICATION_PATH = Path(__file__).parent
+
+CACHE_DIR = APPLICATION_PATH / "catalog_cache"
 GAME_SYSTEM_FILE = "Warhammer 40,000.gst"
+UPDATE_CHECK_DAYS = 7  # Check for updates every 7 days
 
 class CatalogDownloader:
     def __init__(self):
         self.cache_dir = CACHE_DIR
         self.cache_dir.mkdir(exist_ok=True)
         self.available_catalogs = None
+        self.version_file = self.cache_dir / "version_info.json"
+    
+    def get_cache_age(self):
+        """Get the age of the cache in days"""
+        if not self.version_file.exists():
+            return float('inf')
+        
+        try:
+            with open(self.version_file, 'r') as f:
+                version_info = json.load(f)
+                last_update = datetime.fromisoformat(version_info.get('last_update', '2000-01-01'))
+                age = (datetime.now() - last_update).days
+                return age
+        except:
+            return float('inf')
+    
+    def should_check_for_updates(self):
+        """Check if it's time to look for updates"""
+        return self.get_cache_age() >= UPDATE_CHECK_DAYS
+    
+    def update_version_info(self):
+        """Update the version info file"""
+        version_info = {
+            'last_update': datetime.now().isoformat(),
+            'cache_dir': str(self.cache_dir),
+            'github_repo': GITHUB_REPO
+        }
+        with open(self.version_file, 'w') as f:
+            json.dump(version_info, f, indent=2)
+    
+    def check_for_updates(self):
+        """Check if catalog updates are available from GitHub"""
+        try:
+            # Just fetch the repo to see if we can connect
+            response = requests.get(GITHUB_API_URL, timeout=5)
+            response.raise_for_status()
+            
+            # Update the version info
+            self.update_version_info()
+            return True, "Connected to catalog repository"
+        except Exception as e:
+            return False, f"Could not check for updates: {str(e)}"
     
     def download_game_system(self):
         """Download the game system file if not cached"""

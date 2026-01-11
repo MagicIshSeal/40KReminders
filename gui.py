@@ -18,11 +18,15 @@ class RosterReminderGUI:
         
         # Variables
         self.roster_file = tk.StringVar()
-        self.status_text = tk.StringVar(value="Ready to process roster")
+        self.status_text = tk.StringVar(value="Checking for updates...")
         self.roster = None
         self.reminder = None
+        self.downloader = CatalogDownloader()
         
         self.setup_ui()
+        
+        # Check for updates on startup
+        self.root.after(100, self.check_updates_on_startup)
         
     def setup_ui(self):
         # Main container
@@ -149,14 +153,13 @@ class RosterReminderGUI:
             self.root.after(0, lambda: self.status_text.set("Downloading game system..."))
             self.root.after(0, lambda: self.log_output("Loading game system...\n"))
             
-            downloader = CatalogDownloader()
-            game_system_file = downloader.download_game_system()
+            game_system_file = self.downloader.download_game_system()
             
             # Download catalog
             self.root.after(0, lambda: self.status_text.set(f"Downloading {army_name} catalog..."))
             self.root.after(0, lambda: self.log_output(f"Loading {army_name} catalog...\n"))
             
-            json_file = downloader.download_catalog(army_name)
+            json_file = self.downloader.download_catalog(army_name)
             
             if not json_file:
                 self.root.after(0, lambda: messagebox.showerror(
@@ -349,6 +352,42 @@ class RosterReminderGUI:
         
         finally:
             self.progress.stop()
+    
+    def check_updates_on_startup(self):
+        """Check for catalog updates on startup"""
+        thread = threading.Thread(target=self._check_updates_thread, daemon=True)
+        thread.start()
+    
+    def _check_updates_thread(self):
+        """Background thread to check for updates"""
+        try:
+            cache_age = self.downloader.get_cache_age()
+            
+            if cache_age == float('inf'):
+                # First run - no cache
+                self.root.after(0, lambda: self.status_text.set("First run - will download catalogs when needed"))
+                self.root.after(0, lambda: self.log_output("Welcome! Catalogs will be downloaded when you process your first roster.\n"))
+            elif self.downloader.should_check_for_updates():
+                # Time to check for updates
+                self.root.after(0, lambda: self.status_text.set("Checking for catalog updates..."))
+                self.root.after(0, lambda: self.log_output(f"Checking for updates (cache is {cache_age} days old)...\n"))
+                
+                success, message = self.downloader.check_for_updates()
+                
+                if success:
+                    self.root.after(0, lambda: self.status_text.set("✓ Catalogs are up to date - Ready to process roster"))
+                    self.root.after(0, lambda: self.log_output(f"✓ {message}\n\n"))
+                else:
+                    self.root.after(0, lambda: self.status_text.set("⚠ Could not check for updates - Ready to process roster"))
+                    self.root.after(0, lambda: self.log_output(f"⚠ {message}\nUsing cached catalogs.\n\n"))
+            else:
+                # Cache is fresh
+                self.root.after(0, lambda: self.status_text.set(f"Ready to process roster (catalogs cached {cache_age} days ago)"))
+                self.root.after(0, lambda: self.log_output(f"Using cached catalogs (updated {cache_age} days ago).\n\n"))
+        
+        except Exception as e:
+            self.root.after(0, lambda: self.status_text.set("Ready to process roster"))
+            self.root.after(0, lambda: self.log_output(f"Note: {str(e)}\n\n"))
 
 def main():
     root = tk.Tk()

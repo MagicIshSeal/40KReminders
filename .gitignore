@@ -1,17 +1,15 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 *.so
 .Python
 
 # Catalog cache
 catalog_cache/
 
-# Old files (if any)
-*.cat
-*.json
-output.txt
+# PDF output
+*_reminders.pdf
 
 # IDE
 .vscode/
