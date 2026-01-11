@@ -63,6 +63,21 @@ class UnitReminder:
                 unit_name = entry['name'].lower()
                 self.units_cache[unit_name] = entry
         
+        # Cache detachments
+        self.detachments_cache = {}
+        for group in self.data.get('selectionEntryGroups', []):
+            if group['name'] == 'Detachment':
+                for det_entry in group.get('selectionEntries', []):
+                    self.detachments_cache[det_entry['name']] = det_entry
+        
+        # Also check imported catalogs for detachments
+        for imported in self.imported_catalogs:
+            for group in imported.get('selectionEntryGroups', []):
+                if group['name'] == 'Detachment':
+                    for det_entry in group.get('selectionEntries', []):
+                        if det_entry['name'] not in self.detachments_cache:
+                            self.detachments_cache[det_entry['name']] = det_entry
+        
         # Cache rules from catalog
         for rule in self.data.get('sharedRules', []):
             self.rules_cache[rule['id']] = rule
@@ -114,6 +129,18 @@ class UnitReminder:
             return None
         
         return None
+    
+    def list_detachments(self):
+        """List all available detachments"""
+        if not self.detachments_cache:
+            print("No detachments found in this catalog.")
+            return []
+        
+        print(f"\nAvailable Detachments ({len(self.detachments_cache)}):")
+        print("-" * 50)
+        for i, name in enumerate(sorted(self.detachments_cache.keys()), 1):
+            print(f"  {i}. {name}")
+        return list(self.detachments_cache.keys())
     
     def _categorize_ability(self, description: str) -> List[str]:
         """Analyze ability text to determine which phase(s) it applies to"""
@@ -167,7 +194,7 @@ class UnitReminder:
         # Only after checking all specific phases, check for always active
         return ["Always Active"]
     
-    def get_reminders(self, unit_name: str) -> Dict[str, List[Dict]]:
+    def get_reminders(self, unit_name: str, detachment_name: str = None) -> Dict[str, List[Dict]]:
         """Get phase-organized reminders for a unit"""
         unit = self.find_unit(unit_name)
         
@@ -294,11 +321,43 @@ class UnitReminder:
                         if phases:
                             phase_reminders[phases[0]].append(reminder)
         
+        # Extract detachment-specific abilities
+        if detachment_name and detachment_name in self.detachments_cache:
+            detachment = self.detachments_cache[detachment_name]
+            
+            for profile in detachment.get('profiles', []):
+                if profile.get('typeName') == 'Abilities':
+                    ability_name = profile['name']
+                    
+                    for char in profile.get('characteristics', []):
+                        if char['name'] == 'Description':
+                            description = char['value']
+                            
+                            if len(description) > 800 or not description:
+                                continue
+                            
+                            ability_key = f"detachment:{ability_name}:{description[:50]}"
+                            if ability_key in seen_abilities:
+                                continue
+                            seen_abilities[ability_key] = True
+                            
+                            phases = self._categorize_ability(description)
+                            
+                            reminder = {
+                                'ability': ability_name,
+                                'description': description,
+                                'source': 'detachment'
+                            }
+                            
+                            if phases:
+                                phase_reminders[phases[0]].append(reminder)
+        
         return {
             'unit_name': unit['name'],
             'unit_type': unit['type'],
             'cost': next((c['value'] for c in unit['costs'] if c['name'] == 'pts'), 0),
             'stats': self._get_unit_stats(unit),
+            'detachment': detachment_name,
             'reminders': {k: v for k, v in phase_reminders.items() if v}
         }
     
@@ -312,9 +371,9 @@ class UnitReminder:
                 return stats
         return {}
     
-    def display_reminders(self, unit_name: str):
+    def display_reminders(self, unit_name: str, detachment_name: str = None):
         """Display formatted reminders for a unit"""
-        result = self.get_reminders(unit_name)
+        result = self.get_reminders(unit_name, detachment_name)
         
         if not result:
             print(f"Unit '{unit_name}' not found.")
@@ -322,6 +381,8 @@ class UnitReminder:
         
         print(f"\n{'='*70}")
         print(f"UNIT: {result['unit_name']}")
+        if result.get('detachment'):
+            print(f"DETACHMENT: {result['detachment']}")
         print(f"{'='*70}")
         print(f"Cost: {result['cost']} pts", end="")
         
@@ -350,8 +411,12 @@ class UnitReminder:
                     desc = desc.replace('\n', ' ').replace('  ', ' ')
                     desc = desc.replace('■', '\n      •')
                     
-                    source_icon = "🔹" if reminder.get('source') in ['army_rule', 'army_ability'] else "⚡"
-                    source_label = "[Army] " if reminder.get('source') in ['army_rule', 'army_ability'] else ""
+                    source_map = {
+                        'army_rule': ('🔹', '[Army] '),
+                        'army_ability': ('🔹', '[Army] '),
+                        'detachment': ('🔷', '[Detachment] ')
+                    }
+                    source_icon, source_label = source_map.get(reminder.get('source'), ('⚡', ''))
                     
                     print(f"  {source_icon} {source_label}{reminder['ability']}")
                     print(f"      {desc}")
@@ -385,10 +450,12 @@ def main():
     from catalog_manager import CatalogDownloader
     
     if len(sys.argv) < 2:
-        print("Usage: python reminders.py <army_name> <unit_name>")
+        print("Usage: python reminders.py <army_name> <unit_name> [detachment_name]")
+        print("       python reminders.py <army_name> --list-detachments")
         print("       python reminders.py --list-armies")
-        print("\nExample: python reminders.py 'Space Marines' 'Captain in Gravis Armour'")
+        print("\nExample: python reminders.py 'Space Marines' 'Captain in Gravis Armour' 'Gladius Task Force'")
         print("Example: python reminders.py 'Tyranids' 'Hive Tyrant'")
+        print("Example: python reminders.py 'Space Marines' --list-detachments")
         return
     
     downloader = CatalogDownloader()
@@ -405,7 +472,6 @@ def main():
         return
     
     army_name = sys.argv[1]
-    unit_name = ' '.join(sys.argv[2:])
     
     # Download game system file
     print("Loading game system...")
@@ -421,7 +487,24 @@ def main():
     
     # Load the reminder system
     reminder = UnitReminder(json_file, game_system_file)
-    reminder.display_reminders(unit_name)
+    
+    # Check if listing detachments
+    if len(sys.argv) > 2 and sys.argv[2] == '--list-detachments':
+        reminder.list_detachments()
+        return
+    
+    # Get unit and detachment names
+    unit_name = sys.argv[2] if len(sys.argv) > 2 else None
+    if not unit_name:
+        print("Please provide a unit name.")
+        return
+    
+    # Check if detachment specified (remaining args after unit name)
+    detachment_name = None
+    if len(sys.argv) > 3:
+        detachment_name = ' '.join(sys.argv[3:])
+    
+    reminder.display_reminders(unit_name, detachment_name)
 
 
 if __name__ == "__main__":

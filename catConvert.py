@@ -406,10 +406,46 @@ def convert_to_json(filepath, output_file=None):
         shared_groups = root.find('bs:sharedSelectionEntryGroups', ns)
         if shared_groups is not None:
             for group in shared_groups.findall('bs:selectionEntryGroup', ns):
+                # Extract nested selectionEntries from the group
+                group_entries = []
+                entries_list = group.find('bs:selectionEntries', ns)
+                if entries_list is not None:
+                    for entry in entries_list.findall('bs:selectionEntry', ns):
+                        # Extract profiles
+                        profiles = []
+                        profile_list = entry.find('bs:profiles', ns)
+                        if profile_list is not None:
+                            for profile in profile_list.findall('bs:profile', ns):
+                                characteristics = []
+                                char_list = profile.find('bs:characteristics', ns)
+                                if char_list is not None:
+                                    for char in char_list.findall('bs:characteristic', ns):
+                                        characteristics.append({
+                                            'name': char.get('name', ''),
+                                            'value': char.text or ''
+                                        })
+                                profiles.append({
+                                    'id': profile.get('id', ''),
+                                    'name': profile.get('name', ''),
+                                    'typeName': profile.get('typeName', ''),
+                                    'characteristics': characteristics
+                                })
+                        
+                        group_entries.append({
+                            'id': entry.get('id', ''),
+                            'name': entry.get('name', ''),
+                            'type': entry.get('type', ''),
+                            'profiles': profiles
+                        })
+                
+                if group.get('name') == 'Detachment':
+                    print(f"  ✓ Extracted {len(group_entries)} detachments from '{group.get('name')}' group")
+                
                 catalog_data['selectionEntryGroups'].append({
                     'id': group.get('id', ''),
                     'name': group.get('name', ''),
-                    'hidden': group.get('hidden', 'false')
+                    'hidden': group.get('hidden', 'false'),
+                    'selectionEntries': group_entries
                 })
         
         # Parse catalogue links
